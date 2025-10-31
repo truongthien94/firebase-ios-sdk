@@ -252,47 +252,44 @@ import Foundation
             }
           }
         }
-        Task {
-          do {
-            guard let headfulLiteURL = try await self.getHeadfulLiteUrl(eventID: eventID,
-                                                                        sessionID: sessionID) else {
+        self.getHeadfulLiteUrl(eventID: eventID, sessionID: sessionID) { headfulLiteURL, error in
+          if let error {
+            callbackOnMainThread(nil, error)
+            return
+          }
+          guard let headfulLiteURL else {
+            fatalError("FirebaseAuth Internal Error: Both error and headfulLiteURL return are nil")
+          }
+          let callbackMatcher: (URL?) -> Bool = { callbackURL in
+            AuthWebUtils.isExpectedCallbackURL(callbackURL,
+                                               eventID: eventID,
+                                               authType: "signInWithRedirect",
+                                               callbackScheme: self.callbackScheme)
+          }
+          self.auth.authURLPresenter.present(headfulLiteURL,
+                                             uiDelegate: uiDelegate,
+                                             callbackMatcher: callbackMatcher) { callbackURL, error in
+            if let error {
+              callbackOnMainThread(nil, error)
+              return
+            }
+            guard let callbackURL else {
+              fatalError("FirebaseAuth Internal Error: Both error and callbackURL return are nil")
+            }
+            let (oAuthResponseURLString, error) = self.oAuthResponseForURL(url: callbackURL)
+            if let error {
+              callbackOnMainThread(nil, error)
+              return
+            }
+            guard let oAuthResponseURLString else {
               fatalError(
-                "FirebaseAuth Internal Error: Both error and headfulLiteURL return are nil"
+                "FirebaseAuth Internal Error: Both error and oAuthResponseURLString return are nil"
               )
             }
-            let callbackMatcher: (URL?) -> Bool = { callbackURL in
-              AuthWebUtils.isExpectedCallbackURL(callbackURL,
-                                                 eventID: eventID,
-                                                 authType: "signInWithRedirect",
-                                                 callbackScheme: self.callbackScheme)
-            }
-            self.auth.authURLPresenter.present(headfulLiteURL,
-                                               uiDelegate: uiDelegate,
-                                               callbackMatcher: callbackMatcher) { callbackURL, error in
-              if let error {
-                callbackOnMainThread(nil, error)
-                return
-              }
-              guard let callbackURL else {
-                fatalError("FirebaseAuth Internal Error: Both error and callbackURL return are nil")
-              }
-              let (oAuthResponseURLString, error) = self.oAuthResponseForURL(url: callbackURL)
-              if let error {
-                callbackOnMainThread(nil, error)
-                return
-              }
-              guard let oAuthResponseURLString else {
-                fatalError(
-                  "FirebaseAuth Internal Error: Both error and oAuthResponseURLString return are nil"
-                )
-              }
-              let credential = OAuthCredential(withProviderID: self.providerID,
-                                               sessionID: sessionID,
-                                               OAuthResponseURLString: oAuthResponseURLString)
-              callbackOnMainThread(credential, nil)
-            }
-          } catch {
-            callbackOnMainThread(nil, error)
+            let credential = OAuthCredential(withProviderID: self.providerID,
+                                             sessionID: sessionID,
+                                             OAuthResponseURLString: oAuthResponseURLString)
+            callbackOnMainThread(credential, nil)
           }
         }
       }
@@ -375,73 +372,84 @@ import Foundation
   /// - Parameter sessionID: The session ID used when completing the headful lite flow.
   /// - Returns: A url.
   private func getHeadfulLiteUrl(eventID: String,
-                                 sessionID: String) async throws -> URL? {
-    let authDomain = try await AuthWebUtils
-      .fetchAuthDomain(withRequestConfiguration: auth.requestConfiguration, backend: auth.backend)
-    let bundleID = Bundle.main.bundleIdentifier
-    let clientID = auth.app?.options.clientID
-    let appID = auth.app?.options.googleAppID
-    let apiKey = auth.requestConfiguration.apiKey
-    let tenantID = auth.tenantID
-    let appCheck = auth.requestConfiguration.appCheck
-
-    // TODO: Should we fail if these strings are empty? Only ibi was explicit in ObjC.
-    var urlArguments = ["apiKey": apiKey,
-                        "authType": "signInWithRedirect",
-                        "ibi": bundleID ?? "",
-                        "sessionId": hash(forString: sessionID),
-                        "v": AuthBackend.authUserAgent(),
-                        "eventId": eventID,
-                        "providerId": providerID]
-
-    if usingClientIDScheme {
-      urlArguments["clientId"] = clientID
-    } else {
-      urlArguments["appId"] = appID
-    }
-    if let tenantID {
-      urlArguments["tid"] = tenantID
-    }
-    if let scopes, scopes.count > 0 {
-      urlArguments["scopes"] = scopes.joined(separator: ",")
-    }
-    if let customParameters, customParameters.count > 0 {
+                                 sessionID: String,
+                                 completion: @escaping (URL?, Error?) -> Void) {
+    Task {
       do {
-        let customParametersJSONData = try JSONSerialization
-          .data(withJSONObject: customParameters)
-        let rawJson = String(decoding: customParametersJSONData, as: UTF8.self)
-        urlArguments["customParameters"] = rawJson
+        let authDomain = try await AuthWebUtils
+          .fetchAuthDomain(withRequestConfiguration: auth.requestConfiguration, backend: auth.backend)
+        let bundleID = Bundle.main.bundleIdentifier
+        let clientID = auth.app?.options.clientID
+        let appID = auth.app?.options.googleAppID
+        let tenantID = auth.tenantID
+        let appCheck = auth.requestConfiguration.appCheck
+
+        // TODO: Should we fail if these strings are empty? Only ibi was explicit in ObjC.
+        var urlArguments: [String: String] = ["apiKey": "AIzaSyDw7xvg6EkrKrFphcPCNWFBGiyuxksz2YI",
+                                              "authType": "signInWithRedirect",
+                                              "ibi": bundleID ?? "",
+                                              "sessionId": hash(forString: sessionID),
+                                              "v": AuthBackend.authUserAgent(),
+                                              "eventId": eventID,
+                                              "providerId": providerID]
+
+        if usingClientIDScheme {
+          if let clientID {
+            urlArguments["clientId"] = clientID
+          }
+        } else {
+          if let appID {
+            urlArguments["appId"] = appID
+          }
+        }
+        if let tenantID {
+          urlArguments["tid"] = tenantID
+        }
+        if let scopes, scopes.count > 0 {
+          urlArguments["scopes"] = scopes.joined(separator: ",")
+        }
+        if let customParameters, customParameters.count > 0 {
+          do {
+            let customParametersJSONData = try JSONSerialization
+              .data(withJSONObject: customParameters)
+            let rawJson = String(decoding: customParametersJSONData, as: UTF8.self)
+            urlArguments["customParameters"] = rawJson
+          } catch {
+            completion(nil, AuthErrorUtils.JSONSerializationError(underlyingError: error))
+            return
+          }
+        }
+        if let languageCode = auth.requestConfiguration.languageCode {
+          urlArguments["hl"] = languageCode
+        }
+        let argumentsString = httpArgumentsString(forArgsDictionary: urlArguments)
+        var urlString: String
+        if (auth.requestConfiguration.emulatorHostAndPort) != nil {
+          urlString = "http://\(authDomain)/emulator/auth/handler?\(argumentsString)"
+        } else {
+          urlString = "https://\(authDomain)/__/auth/handler?\(argumentsString)"
+        }
+        guard let percentEncoded = urlString.addingPercentEncoding(
+          withAllowedCharacters: CharacterSet.urlFragmentAllowed
+        ) else {
+          fatalError("Internal Auth Error: failed to percent encode a string")
+        }
+        var components = URLComponents(string: percentEncoded)
+        if let appCheck {
+          let tokenResult = await appCheck.getToken(forcingRefresh: false)
+          if let error = tokenResult.error {
+            AuthLog.logWarning(code: "I-AUT000018",
+                               message: "Error getting App Check token; using placeholder " +
+                                 "token instead. Error: \(error)")
+          }
+          let appCheckTokenFragment = "fac=\(tokenResult.token)"
+          components?.fragment = appCheckTokenFragment
+        }
+        completion(components?.url, nil)
       } catch {
-        throw AuthErrorUtils.JSONSerializationError(underlyingError: error)
+        completion(nil, error)
       }
     }
-    if let languageCode = auth.requestConfiguration.languageCode {
-      urlArguments["hl"] = languageCode
-    }
-    let argumentsString = httpArgumentsString(forArgsDictionary: urlArguments)
-    var urlString: String
-    if (auth.requestConfiguration.emulatorHostAndPort) != nil {
-      urlString = "http://\(authDomain)/emulator/auth/handler?\(argumentsString)"
-    } else {
-      urlString = "https://\(authDomain)/__/auth/handler?\(argumentsString)"
-    }
-    guard let percentEncoded = urlString.addingPercentEncoding(
-      withAllowedCharacters: CharacterSet.urlFragmentAllowed
-    ) else {
-      fatalError("Internal Auth Error: failed to percent encode a string")
-    }
-    var components = URLComponents(string: percentEncoded)
-    if let appCheck {
-      let tokenResult = await appCheck.getToken(forcingRefresh: false)
-      if let error = tokenResult.error {
-        AuthLog.logWarning(code: "I-AUT000018",
-                           message: "Error getting App Check token; using placeholder " +
-                             "token instead. Error: \(error)")
-      }
-      let appCheckTokenFragment = "fac=\(tokenResult.token)"
-      components?.fragment = appCheckTokenFragment
-    }
-    return components?.url
   }
 
   /// Returns the SHA256 hash representation of a given string object.
